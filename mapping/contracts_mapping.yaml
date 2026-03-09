@@ -1,0 +1,121 @@
+# Mapping migrazione sorgenia.contracts -> Mongo sorgenia.contracts
+# deleted: true => campo ignorato
+
+fields:
+  - source: name
+    target: name
+
+  - source: activation_date
+    target: activationdate
+
+  - source: case_id
+    target: case_id
+
+  - source: cig_code
+    target: cig_code
+
+  - source: client_id
+    target: accountcode
+
+  - source: commodity_type
+    target: commodity_type
+
+  - source: contact_id
+    target: contactid
+
+  - source: contract_end_date
+    target: disconnectiondate
+
+  - source: contract_type
+    target: use_type
+
+  - source: cup
+    target: cup
+
+  - source: e_invoice
+    target: e_invoice
+
+  - source: institution_name
+    target: institution_name
+
+  - source: ipa_code
+    target: ipa_code
+
+  - source: is_split_iva
+    target: is_split_iva
+
+  - source: office_code
+    target: office_code
+
+  - source: sdi_code
+    target: sdi_code
+
+  - source: sdi_write_date
+    target: sdi_write_date
+
+  - source: sign_date
+    target: signaturedate
+
+  - source: sign_location
+    target: luogo_firma
+
+  # Esempi di campi cancellati nello spreadsheet
+  - source: active
+    deleted: true
+
+  - source: active_client_id
+    deleted: true
+
+  - source: agent_id
+    deleted: true
+
+  - source: create_date
+    deleted: true
+
+  - source: write_uid
+    deleted: true
+
+lookups:
+  # I lookup avvengono solo se la FK è valorizzata e il record collegato esiste.
+  # I campi vengono salvati in notazione dot (nested in Mongo).
+
+  - source_fk: client_id
+    schema: sorgenia
+    table: contracts
+    table_pk: id
+    target_prefix: contracts
+    field_map:
+      accountcode: accountcode
+      commodity_type: commodity_type
+
+  - source_fk: contact_id
+    schema: sorgenia
+    table: order
+    table_pk: id
+    target_prefix: order
+    field_map:
+      contactid: contactid
+      luogo_sottoscrittore_conto: luogo_sottoscrittore_conto
+
+  - source_fk: billing_profile_id
+    schema: sorgenia
+    table: billing_profile
+    table_pk: id
+    target_prefix: billing_profile
+    field_map:
+      cig_code: cig_code
+      cup: cup
+      e_invoice: e_invoice
+      institution_name: institution_name
+      ipa_code: ipa_code
+      office_code: office_code
+      sdi_code: sdi_code
+      sdi_write_date: sdi_write_date
+
+  - source_fk: res_partner_id
+    schema: sorgenia
+    table: res_partner
+    table_pk: id
+    target_prefix: res_partner
+    field_map:
+      is_split_iva: is_split_iva
