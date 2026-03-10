@@ -33,6 +33,25 @@ Puoi estendere il mapping in base allo spreadsheet completo.
 python src/migrate_contracts.py
 ```
 
+Per testare la migrazione su un sottoinsieme di contratti puoi impostare un filtro opzionale via variabile ambiente.
+
+Formato atteso per `CONTRACT_NAMES_FILTER`:
+- stringa CSV (valori separati da virgola);
+- ogni valore deve essere il contenuto esatto del campo `name` in `sorgenia.contracts`;
+- eventuali spazi prima/dopo i valori vengono ignorati.
+
+Esempi validi:
+
+```bash
+export CONTRACT_NAMES_FILTER="CONTRACT_001,CONTRACT_002"
+export CONTRACT_NAMES_FILTER="CONTRACT_001, CONTRACT_002, CONTRACT_003"
+python src/migrate_contracts.py
+```
+
+Quando `CONTRACT_NAMES_FILTER` non è valorizzata (o è vuota), lo script migra tutti i record di `sorgenia.contracts`.
+
+Lo script espone inoltre log di avanzamento in CLI (caricamento config, query sorgente, batch processati, riepilogo finale).
+
 Output atteso:
 
 - numero documenti creati;
