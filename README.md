@@ -2,9 +2,9 @@
 
 Script Python per migrare dati da PostgreSQL (`sorgenia.contracts`) verso MongoDB (`sorgenia.contracts`) con regole:
 
-- ignora i campi marcati come cancellati (`deleted: true`);
-- arricchisce i dati con lookup su altre tabelle solo se il record collegato esiste;
-- crea il documento su Mongo solo se non esiste già (`$setOnInsert`).
+- query base con alias già allineati ai campi Mongo;
+- arricchimento tramite sequenza ordinata di lookup PostgreSQL;
+- inserimento idempotente su Mongo (`$setOnInsert`).
 
 ## 1) Setup
 
@@ -17,15 +17,16 @@ cp .env.example .env
 
 Compila il file `.env` con le credenziali reali di PostgreSQL e MongoDB.
 
-## 2) Configurazione mapping
+## 2) Organizzazione per sequenze (riordinabile)
 
-Il file `mapping/contracts_mapping.yaml` contiene:
+Lo script `src/migrate_contracts.py` è organizzato in blocchi che puoi spostare facilmente:
 
-- `fields`: mapping colonna sorgente -> campo target Mongo;
-- `deleted: true`: campo da ignorare;
-- `lookups`: relazioni su altre tabelle (join logico tramite FK) da applicare solo se il record collegato esiste.
+- `BASE_QUERY_COLUMNS`: colonne query sorgente con alias target Mongo;
+- `BASE_DOCUMENT_FIELDS`: campi che finiscono nel documento base;
+- `PG_LOOKUP_STEPS`: sequenza di query lookup PostgreSQL;
+- `MONGO_WRITE_STEPS`: sequenza di scritture Mongo.
 
-Puoi estendere il mapping in base allo spreadsheet completo.
+Per cambiare ordine di esecuzione ti basta riordinare gli elementi nelle liste.
 
 ## 3) Esecuzione
 
@@ -50,7 +51,7 @@ python src/migrate_contracts.py
 
 Quando `CONTRACT_NAMES_FILTER` non è valorizzata (o è vuota), lo script migra tutti i record di `sorgenia.contracts`.
 
-Lo script espone inoltre log di avanzamento in CLI (caricamento config, query sorgente, batch processati, riepilogo finale).
+Lo script espone inoltre log di avanzamento in CLI (query sorgente, batch processati, riepilogo finale).
 
 Output atteso:
 
@@ -59,6 +60,6 @@ Output atteso:
 
 ## 4) Note chiave implementative
 
-- query di base: `SELECT <campi_mappati> FROM sorgenia.contracts`;
+- query di base: `SELECT <campi con alias> FROM sorgenia.contracts`;
 - chiave idempotente su Mongo: `name`;
 - insert-only su Mongo tramite `update_one(..., upsert=True, $setOnInsert=...)`.
