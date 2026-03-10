@@ -11,6 +11,7 @@ Regole implementate:
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,6 +47,11 @@ class AppConfig:
     mongo: MongoConfig
     batch_size: int
     mapping_file: str
+    contract_names_filter: list[str]
+
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
 
 def env(name: str, default: str | None = None) -> str:
@@ -71,11 +77,15 @@ def load_config() -> AppConfig:
         db=env("MONGO_DB", "sorgenia"),
         collection=env("MONGO_COLLECTION", "contracts"),
     )
+    raw_contract_filter = os.getenv("CONTRACT_NAMES_FILTER", "")
+    contract_names_filter = [name.strip() for name in raw_contract_filter.split(",") if name.strip()]
+
     return AppConfig(
         postgres=pg,
         mongo=mongo,
         batch_size=int(env("BATCH_SIZE", "500")),
         mapping_file=env("MAPPING_FILE", "./mapping/contracts_mapping.yaml"),
+        contract_names_filter=contract_names_filter,
     )
 
 
@@ -106,9 +116,16 @@ def quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def build_select_query(schema: str, table: str, source_fields: list[str]) -> str:
+def build_select_query(schema: str, table: str, source_fields: list[str], contract_names_filter: list[str]) -> tuple[str, list[Any]]:
     fields_sql = ", ".join(quote_ident(f) for f in source_fields)
-    return f"SELECT {fields_sql} FROM {quote_ident(schema)}.{quote_ident(table)}"
+    base_query = f"SELECT {fields_sql} FROM {quote_ident(schema)}.{quote_ident(table)}"
+
+    if not contract_names_filter:
+        return base_query, []
+
+    placeholders = ", ".join(["%s"] * len(contract_names_filter))
+    filtered_query = f"{base_query} WHERE {quote_ident('name')} IN ({placeholders})"
+    return filtered_query, contract_names_filter
 
 
 def extract_base_document(row: dict[str, Any], field_rules: list[dict[str, Any]]) -> dict[str, Any]:
@@ -160,7 +177,10 @@ def add_lookup_data(lookup_cur, row: dict[str, Any], doc: dict[str, Any], lookup
 
 
 def migrate() -> None:
+    logger.info("[1/6] Caricamento configurazione da variabili ambiente")
     cfg = load_config()
+
+    logger.info("[2/6] Caricamento mapping da file: %s", cfg.mapping_file)
     mapping = load_mapping(cfg.mapping_file)
     field_rules: list[dict[str, Any]] = mapping.get("fields", [])
     lookups: list[dict[str, Any]] = mapping.get("lookups", [])
@@ -170,30 +190,50 @@ def migrate() -> None:
 
     source_fields = sorted({rule["source"] for rule in field_rules if "source" in rule})
 
+    if cfg.contract_names_filter:
+        logger.info(
+            "Filtro contratti attivo: verranno migrati solo %d contratti (%s)",
+            len(cfg.contract_names_filter),
+            ", ".join(cfg.contract_names_filter),
+        )
+    else:
+        logger.info("Nessun filtro contratti attivo: verranno valutati tutti i record")
+
+    logger.info("[3/6] Apertura connessioni a PostgreSQL e MongoDB")
+
     pg_conn = pg_connect(cfg.postgres)
     mongo_col = mongo_collection(cfg.mongo)
 
     try:
+        logger.info("[4/6] Avvio lettura batch da PostgreSQL")
         # Cursor dict per nome colonna.
         with pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur, pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as lookup_cur:
-            query = build_select_query(
+            query, query_params = build_select_query(
                 cfg.postgres.schema,
                 cfg.postgres.table,
                 source_fields,
+                cfg.contract_names_filter,
             )
-            cur.execute(query)
+            logger.info("Esecuzione query sorgente")
+            cur.execute(query, query_params)
 
             migrated = 0
             skipped_existing = 0
+            skipped_missing_name = 0
+            processed = 0
             while True:
                 rows = cur.fetchmany(cfg.batch_size)
                 if not rows:
                     break
 
+                logger.info("Batch ricevuto: %d record", len(rows))
+
                 for row in rows:
+                    processed += 1
                     document = extract_base_document(row, field_rules)
                     if "name" not in document:
                         # Chiave minima per identificare il contratto.
+                        skipped_missing_name += 1
                         continue
 
                     add_lookup_data(lookup_cur, row, document, lookups)
@@ -209,8 +249,16 @@ def migrate() -> None:
                     else:
                         skipped_existing += 1
 
-            print(f"Migrazione completata. Creati: {migrated}, Esistenti ignorati: {skipped_existing}")
+            logger.info("[5/6] Migrazione completata")
+            logger.info(
+                "Totale processati: %d | Creati: %d | Esistenti ignorati: %d | Senza name: %d",
+                processed,
+                migrated,
+                skipped_existing,
+                skipped_missing_name,
+            )
     finally:
+        logger.info("[6/6] Chiusura connessione PostgreSQL")
         pg_conn.close()
 
 
