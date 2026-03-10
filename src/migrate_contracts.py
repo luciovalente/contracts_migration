@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Migrazione contratti da PostgreSQL a MongoDB.
+"""Migrazione contratti con sequenza esplicita di query/update.
 
-Organizzazione a step:
-1. Query base su sorgenia.contracts con alias già allineati ai campi Mongo.
-2. Sequenza ordinata di lookup PostgreSQL (riordinabile in PG_LOOKUP_STEPS).
-3. Sequenza ordinata di write Mongo (riordinabile in MONGO_WRITE_STEPS).
+Flusso per ogni record di `sorgenia.contracts`:
+1) lettura da PostgreSQL (`sorgenia.contracts`);
+2) insert/upsert su MongoDB (`contract`);
+3) update MongoDB (`order`);
+4) update MongoDB (`orderitems`);
+5) update PostgreSQL (`sorgenia.billing_profile`);
+6) update PostgreSQL (`sorgenia.res_partner`).
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import psycopg2
@@ -29,14 +33,15 @@ class PostgresConfig:
     user: str
     password: str
     schema: str
-    table: str
 
 
 @dataclass(frozen=True)
 class MongoConfig:
     uri: str
     db: str
-    collection: str
+    contract_collection: str
+    order_collection: str
+    orderitems_collection: str
 
 
 @dataclass(frozen=True)
@@ -47,145 +52,8 @@ class AppConfig:
     contract_names_filter: list[str]
 
 
-@dataclass(frozen=True)
-class LookupStep:
-    name: str
-    source_fk: str
-    schema: str
-    table: str
-    table_pk: str
-    selected_fields: list[str]
-    target_map: dict[str, str]
-
-
-@dataclass(frozen=True)
-class MongoWriteStep:
-    name: str
-    filter_field: str
-
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
-
-# Query principale: alias -> campo target Mongo.
-BASE_QUERY_COLUMNS: list[str] = [
-    "name",
-    "activation_date AS activationdate",
-    "case_id",
-    "cig_code",
-    "client_id AS accountcode",
-    "commodity_type",
-    "contact_id AS contactid",
-    "contract_end_date AS disconnectiondate",
-    "contract_type AS use_type",
-    "cup",
-    "e_invoice",
-    "institution_name",
-    "ipa_code",
-    "is_split_iva",
-    "office_code",
-    "sdi_code",
-    "sdi_write_date",
-    "sign_date AS signaturedate",
-    "sign_location AS luogo_firma",
-    # FK tecniche per i lookup successivi.
-    "client_id",
-    "contact_id",
-    "billing_profile_id",
-    "res_partner_id",
-]
-
-# Campi del documento base Mongo (escludendo FK tecniche).
-BASE_DOCUMENT_FIELDS: list[str] = [
-    "name",
-    "activationdate",
-    "case_id",
-    "cig_code",
-    "accountcode",
-    "commodity_type",
-    "contactid",
-    "disconnectiondate",
-    "use_type",
-    "cup",
-    "e_invoice",
-    "institution_name",
-    "ipa_code",
-    "is_split_iva",
-    "office_code",
-    "sdi_code",
-    "sdi_write_date",
-    "signaturedate",
-    "luogo_firma",
-]
-
-# Step di lookup: basta riordinare o aggiungere elementi qui.
-PG_LOOKUP_STEPS: list[LookupStep] = [
-    LookupStep(
-        name="contracts_from_client_id",
-        source_fk="client_id",
-        schema="sorgenia",
-        table="contracts",
-        table_pk="id",
-        selected_fields=["accountcode", "commodity_type"],
-        target_map={
-            "accountcode": "contracts.accountcode",
-            "commodity_type": "contracts.commodity_type",
-        },
-    ),
-    LookupStep(
-        name="order_from_contact_id",
-        source_fk="contact_id",
-        schema="sorgenia",
-        table="order",
-        table_pk="id",
-        selected_fields=["contactid", "luogo_sottoscrittore_conto"],
-        target_map={
-            "contactid": "order.contactid",
-            "luogo_sottoscrittore_conto": "order.luogo_sottoscrittore_conto",
-        },
-    ),
-    LookupStep(
-        name="billing_profile_from_billing_profile_id",
-        source_fk="billing_profile_id",
-        schema="sorgenia",
-        table="billing_profile",
-        table_pk="id",
-        selected_fields=[
-            "cig_code",
-            "cup",
-            "e_invoice",
-            "institution_name",
-            "ipa_code",
-            "office_code",
-            "sdi_code",
-            "sdi_write_date",
-        ],
-        target_map={
-            "cig_code": "billing_profile.cig_code",
-            "cup": "billing_profile.cup",
-            "e_invoice": "billing_profile.e_invoice",
-            "institution_name": "billing_profile.institution_name",
-            "ipa_code": "billing_profile.ipa_code",
-            "office_code": "billing_profile.office_code",
-            "sdi_code": "billing_profile.sdi_code",
-            "sdi_write_date": "billing_profile.sdi_write_date",
-        },
-    ),
-    LookupStep(
-        name="res_partner_from_res_partner_id",
-        source_fk="res_partner_id",
-        schema="sorgenia",
-        table="res_partner",
-        table_pk="id",
-        selected_fields=["is_split_iva"],
-        target_map={"is_split_iva": "res_partner.is_split_iva"},
-    ),
-]
-
-# Step Mongo: oggi insert-only idempotente; puoi aggiungerne altri in sequenza.
-MONGO_WRITE_STEPS: list[MongoWriteStep] = [
-    MongoWriteStep(name="insert_contract_if_missing", filter_field="name")
-]
 
 
 def env(name: str, default: str | None = None) -> str:
@@ -204,13 +72,15 @@ def load_config() -> AppConfig:
         user=env("POSTGRES_USER"),
         password=env("POSTGRES_PASSWORD"),
         schema=env("POSTGRES_SCHEMA", "sorgenia"),
-        table=env("POSTGRES_TABLE", "contracts"),
     )
     mongo = MongoConfig(
         uri=env("MONGO_URI"),
         db=env("MONGO_DB", "sorgenia"),
-        collection=env("MONGO_COLLECTION", "contracts"),
+        contract_collection=env("MONGO_CONTRACT_COLLECTION", "contract"),
+        order_collection=env("MONGO_ORDER_COLLECTION", "order"),
+        orderitems_collection=env("MONGO_ORDERITEMS_COLLECTION", "orderitems"),
     )
+
     raw_contract_filter = os.getenv("CONTRACT_NAMES_FILTER", "")
     contract_names_filter = [name.strip() for name in raw_contract_filter.split(",") if name.strip()]
 
@@ -232,134 +102,191 @@ def pg_connect(cfg: PostgresConfig):
     )
 
 
-def mongo_collection(cfg: MongoConfig) -> Collection:
+def mongo_collections(cfg: MongoConfig) -> tuple[Collection, Collection, Collection]:
     client = MongoClient(cfg.uri)
-    return client[cfg.db][cfg.collection]
+    db = client[cfg.db]
+    return db[cfg.contract_collection], db[cfg.order_collection], db[cfg.orderitems_collection]
 
 
 def quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def build_base_query(schema: str, table: str, contract_names_filter: list[str]) -> tuple[str, list[Any]]:
-    fields_sql = ", ".join(BASE_QUERY_COLUMNS)
-    base_query = f"SELECT {fields_sql} FROM {quote_ident(schema)}.{quote_ident(table)}"
-
+def build_contracts_query(schema: str, contract_names_filter: list[str]) -> tuple[str, list[Any]]:
+    base_query = f"SELECT * FROM {quote_ident(schema)}.{quote_ident('contracts')}"
     if not contract_names_filter:
         return base_query, []
 
     placeholders = ", ".join(["%s"] * len(contract_names_filter))
-    filtered_query = f"{base_query} WHERE {quote_ident('name')} IN ({placeholders})"
-    return filtered_query, contract_names_filter
+    query = f"{base_query} WHERE {quote_ident('name')} IN ({placeholders})"
+    return query, contract_names_filter
 
 
-def extract_base_document(row: dict[str, Any]) -> dict[str, Any]:
-    return {field: row[field] for field in BASE_DOCUMENT_FIELDS if row.get(field) is not None}
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def build_lookup_query(step: LookupStep) -> str:
-    selected = ", ".join([quote_ident(step.table_pk), *(quote_ident(field) for field in step.selected_fields)])
-    return (
-        f"SELECT {selected} "
-        f"FROM {quote_ident(step.schema)}.{quote_ident(step.table)} "
-        f"WHERE {quote_ident(step.table_pk)} = %s"
+def build_contract_document(row: dict[str, Any]) -> dict[str, Any]:
+    now = utc_now()
+    contract_id = row.get("id")
+    return {
+        "_id": str(contract_id) if contract_id is not None else row.get("name"),
+        "accountcode": row.get("client_id"),
+        "additional_documents": row.get("additional_documents"),
+        "cd_proposta": row.get("proposal_code"),
+        "channel": row.get("channel"),
+        "code": row.get("code"),
+        "commodity_type": row.get("commodity_type"),
+        "contract_number": row.get("contract_number"),
+        "contract_type": row.get("contract_type"),
+        "contractstatus": row.get("contract_status") or "Active",
+        "created_by": row.get("created_by") or "migration-script",
+        "createdate": row.get("create_date") or now,
+        "description": row.get("description"),
+        "document_id": row.get("document_id"),
+        "enddate": row.get("contract_end_date"),
+        "flag_attivazione_ancitipata": row.get("flag_attivazione_ancitipata"),
+        "internaldata": {
+            "modified_by": row.get("updated_by") or row.get("created_by") or "migration-script",
+            "_region": row.get("region") or "EU",
+        },
+        "name": row.get("name"),
+        "note": row.get("note"),
+        "sending_date": row.get("sending_date"),
+        "signaturedate": row.get("sign_date"),
+        "sm_name": "contract",
+        "sm_reason": "Migrated from sorgenia.contracts",
+        "sm_state": row.get("sm_state") or "attivo",
+        "sm_version": row.get("sm_version") or 1,
+        "startdate": row.get("activation_date") or now,
+        "subtype": row.get("subtype"),
+        "totalvolumeconsumption": row.get("totalvolumeconsumption"),
+        "type": row.get("type") or "InOrder",
+        "updated_by": row.get("updated_by"),
+        "updatedate": row.get("write_date") or now,
+    }
+
+
+def insert_contract(contract_col: Collection, contract_doc: dict[str, Any]) -> None:
+    contract_col.update_one(
+        {"_id": contract_doc["_id"]},
+        {"$setOnInsert": contract_doc},
+        upsert=True,
     )
 
 
-def apply_lookup_steps(lookup_cur, row: dict[str, Any], doc: dict[str, Any]) -> None:
-    for step in PG_LOOKUP_STEPS:
-        fk_value = row.get(step.source_fk)
-        if fk_value is None:
-            continue
-
-        lookup_cur.execute(build_lookup_query(step), (fk_value,))
-        found = lookup_cur.fetchone()
-        if found is None:
-            continue
-
-        for source_col, target_col in step.target_map.items():
-            value = found.get(source_col)
-            if value is not None:
-                doc[target_col] = value
+def update_order(order_col: Collection, contract_doc: dict[str, Any]) -> None:
+    order_col.update_many(
+        {"contract_id": contract_doc["_id"]},
+        {
+            "$set": {
+                "accountcode": contract_doc.get("accountcode"),
+                "contract_number": contract_doc.get("contract_number"),
+                "contractstatus": contract_doc.get("contractstatus"),
+                "updatedate": utc_now(),
+            }
+        },
+    )
 
 
-def apply_mongo_write_steps(mongo_col: Collection, doc: dict[str, Any]) -> bool:
-    for step in MONGO_WRITE_STEPS:
-        unique_value = doc.get(step.filter_field)
-        if unique_value is None:
-            return False
+def update_orderitems(orderitems_col: Collection, contract_doc: dict[str, Any]) -> None:
+    orderitems_col.update_many(
+        {"contract_id": contract_doc["_id"]},
+        {
+            "$set": {
+                "accountcode": contract_doc.get("accountcode"),
+                "contract_number": contract_doc.get("contract_number"),
+                "updatedate": utc_now(),
+            }
+        },
+    )
 
-        result = mongo_col.update_one(
-            {step.filter_field: unique_value},
-            {"$setOnInsert": doc},
-            upsert=True,
-        )
-        if result.upserted_id is not None:
-            return True
 
-    return False
+def update_billing_profile(pg_cur, schema: str, row: dict[str, Any]) -> None:
+    billing_profile_id = row.get("billing_profile_id")
+    if billing_profile_id is None:
+        return
+
+    pg_cur.execute(
+        f"""
+        UPDATE {quote_ident(schema)}.{quote_ident('billing_profile')}
+           SET cig_code = %s,
+               cup = %s,
+               e_invoice = %s,
+               institution_name = %s,
+               ipa_code = %s,
+               office_code = %s,
+               sdi_code = %s,
+               sdi_write_date = COALESCE(%s, sdi_write_date)
+         WHERE id = %s
+        """,
+        (
+            row.get("cig_code"),
+            row.get("cup"),
+            row.get("e_invoice"),
+            row.get("institution_name"),
+            row.get("ipa_code"),
+            row.get("office_code"),
+            row.get("sdi_code"),
+            row.get("sdi_write_date"),
+            billing_profile_id,
+        ),
+    )
+
+
+def update_res_partner(pg_cur, schema: str, row: dict[str, Any]) -> None:
+    res_partner_id = row.get("res_partner_id")
+    if res_partner_id is None:
+        return
+
+    pg_cur.execute(
+        f"""
+        UPDATE {quote_ident(schema)}.{quote_ident('res_partner')}
+           SET is_split_iva = COALESCE(%s, is_split_iva)
+         WHERE id = %s
+        """,
+        (row.get("is_split_iva"), res_partner_id),
+    )
 
 
 def migrate() -> None:
-    logger.info("[1/5] Caricamento configurazione da variabili ambiente")
+    logger.info("[1/6] Caricamento configurazione")
     cfg = load_config()
 
-    if cfg.contract_names_filter:
-        logger.info(
-            "Filtro contratti attivo: verranno migrati solo %d contratti (%s)",
-            len(cfg.contract_names_filter),
-            ", ".join(cfg.contract_names_filter),
-        )
-    else:
-        logger.info("Nessun filtro contratti attivo: verranno valutati tutti i record")
-
-    logger.info("[2/5] Apertura connessioni a PostgreSQL e MongoDB")
+    logger.info("[2/6] Apertura connessioni")
     pg_conn = pg_connect(cfg.postgres)
-    mongo_col = mongo_collection(cfg.mongo)
+    contract_col, order_col, orderitems_col = mongo_collections(cfg.mongo)
 
-    try:
-        logger.info("[3/5] Avvio lettura batch da PostgreSQL")
-        with pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur, pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as lookup_cur:
-            query, query_params = build_base_query(cfg.postgres.schema, cfg.postgres.table, cfg.contract_names_filter)
-            logger.info("Esecuzione query sorgente")
-            cur.execute(query, query_params)
+    query, params = build_contracts_query(cfg.postgres.schema, cfg.contract_names_filter)
 
-            migrated = 0
-            skipped_existing = 0
-            skipped_missing_name = 0
-            processed = 0
+    total = 0
+    with pg_conn, pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as read_cur:
+        logger.info("[3/6] Query sorgente: lettura da sorgenia.contracts")
+        read_cur.execute(query, params)
 
-            while True:
-                rows = cur.fetchmany(cfg.batch_size)
-                if not rows:
-                    break
+        while True:
+            rows = read_cur.fetchmany(cfg.batch_size)
+            if not rows:
+                break
 
-                logger.info("Batch ricevuto: %d record", len(rows))
-                for row in rows:
-                    processed += 1
-                    document = extract_base_document(row)
-                    if "name" not in document:
-                        skipped_missing_name += 1
-                        continue
+            for row in rows:
+                total += 1
+                contract_doc = build_contract_document(row)
+                if contract_doc.get("_id") is None:
+                    continue
 
-                    apply_lookup_steps(lookup_cur, row, document)
-                    inserted = apply_mongo_write_steps(mongo_col, document)
-                    if inserted:
-                        migrated += 1
-                    else:
-                        skipped_existing += 1
+                insert_contract(contract_col, contract_doc)
+                update_order(order_col, contract_doc)
+                update_orderitems(orderitems_col, contract_doc)
 
-            logger.info("[4/5] Migrazione completata")
-            logger.info(
-                "Totale processati: %d | Creati: %d | Esistenti ignorati: %d | Senza name: %d",
-                processed,
-                migrated,
-                skipped_existing,
-                skipped_missing_name,
-            )
-    finally:
-        logger.info("[5/5] Chiusura connessione PostgreSQL")
-        pg_conn.close()
+                with pg_conn.cursor() as write_cur:
+                    update_billing_profile(write_cur, cfg.postgres.schema, row)
+                    update_res_partner(write_cur, cfg.postgres.schema, row)
+
+    logger.info("[4/6] Migrazione completata. Record processati: %d", total)
+    logger.info("[5/6] Commit PostgreSQL completato")
+    pg_conn.close()
+    logger.info("[6/6] Chiusura connessione PostgreSQL")
 
 
 if __name__ == "__main__":

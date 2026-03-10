@@ -1,10 +1,13 @@
-# Migrazione `sorgenia.contracts` da PostgreSQL a MongoDB
+# Migrazione `sorgenia.contracts` verso MongoDB + aggiornamenti correlati
 
-Script Python per migrare dati da PostgreSQL (`sorgenia.contracts`) verso MongoDB (`sorgenia.contracts`) con regole:
+Script Python per eseguire una sequenza esplicita di operazioni:
 
-- query base con alias già allineati ai campi Mongo;
-- arricchimento tramite sequenza ordinata di lookup PostgreSQL;
-- inserimento idempotente su Mongo (`$setOnInsert`).
+1. Query di lettura da PostgreSQL su `sorgenia.contracts`.
+2. Insert/upsert su MongoDB nella collection `contract` con i campi principali del documento contratto.
+3. Update su MongoDB nella collection `order`.
+4. Update su MongoDB nella collection `orderitems`.
+5. Update su PostgreSQL su `sorgenia.billing_profile`.
+6. Update su PostgreSQL su `sorgenia.res_partner`.
 
 ## 1) Setup
 
@@ -15,18 +18,27 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Compila il file `.env` con le credenziali reali di PostgreSQL e MongoDB.
+Compila `.env` con credenziali reali.
 
-## 2) Organizzazione per sequenze (riordinabile)
+## 2) Variabili principali
 
-Lo script `src/migrate_contracts.py` è organizzato in blocchi che puoi spostare facilmente:
-
-- `BASE_QUERY_COLUMNS`: colonne query sorgente con alias target Mongo;
-- `BASE_DOCUMENT_FIELDS`: campi che finiscono nel documento base;
-- `PG_LOOKUP_STEPS`: sequenza di query lookup PostgreSQL;
-- `MONGO_WRITE_STEPS`: sequenza di scritture Mongo.
-
-Per cambiare ordine di esecuzione ti basta riordinare gli elementi nelle liste.
+- PostgreSQL:
+  - `POSTGRES_HOST`
+  - `POSTGRES_PORT`
+  - `POSTGRES_DB`
+  - `POSTGRES_USER`
+  - `POSTGRES_PASSWORD`
+  - `POSTGRES_SCHEMA` (default: `sorgenia`)
+- MongoDB:
+  - `MONGO_URI`
+  - `MONGO_DB` (default: `sorgenia`)
+  - `MONGO_CONTRACT_COLLECTION` (default: `contract`)
+  - `MONGO_ORDER_COLLECTION` (default: `order`)
+  - `MONGO_ORDERITEMS_COLLECTION` (default: `orderitems`)
+- Batch:
+  - `BATCH_SIZE` (default: `500`)
+- Filtro opzionale contratti:
+  - `CONTRACT_NAMES_FILTER` (CSV di `name`)
 
 ## 3) Esecuzione
 
@@ -34,32 +46,6 @@ Per cambiare ordine di esecuzione ti basta riordinare gli elementi nelle liste.
 python src/migrate_contracts.py
 ```
 
-Per testare la migrazione su un sottoinsieme di contratti puoi impostare un filtro opzionale via variabile ambiente.
+## 4) Nota sul documento `contract`
 
-Formato atteso per `CONTRACT_NAMES_FILTER`:
-- stringa CSV (valori separati da virgola);
-- ogni valore deve essere il contenuto esatto del campo `name` in `sorgenia.contracts`;
-- eventuali spazi prima/dopo i valori vengono ignorati.
-
-Esempi validi:
-
-```bash
-export CONTRACT_NAMES_FILTER="CONTRACT_001,CONTRACT_002"
-export CONTRACT_NAMES_FILTER="CONTRACT_001, CONTRACT_002, CONTRACT_003"
-python src/migrate_contracts.py
-```
-
-Quando `CONTRACT_NAMES_FILTER` non è valorizzata (o è vuota), lo script migra tutti i record di `sorgenia.contracts`.
-
-Lo script espone inoltre log di avanzamento in CLI (query sorgente, batch processati, riepilogo finale).
-
-Output atteso:
-
-- numero documenti creati;
-- numero record già presenti e ignorati.
-
-## 4) Note chiave implementative
-
-- query di base: `SELECT <campi con alias> FROM sorgenia.contracts`;
-- chiave idempotente su Mongo: `name`;
-- insert-only su Mongo tramite `update_one(..., upsert=True, $setOnInsert=...)`.
+La funzione `build_contract_document` costruisce il documento Mongo con i campi richiesti (es. `_id`, `accountcode`, `cd_proposta`, `contract_number`, `contractstatus`, `signaturedate`, `startdate`, `updatedate`, `internaldata`, ecc.), valorizzando i dati da `sorgenia.contracts` e usando default dove necessario.
