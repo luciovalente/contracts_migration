@@ -35,6 +35,7 @@ Compila `.env` con credenziali reali.
   - `MONGO_CONTRACT_COLLECTION` (default: `contract`)
   - `MONGO_ORDER_COLLECTION` (default: `order`)
   - `MONGO_ORDERITEMS_COLLECTION` (default: `orderitems`)
+  - `MONGO_TLS_INSECURE` (default: `false`; abilita certificati TLS non validi se `true`)
 - Batch:
   - `BATCH_SIZE` (default: `500`)
 - Filtro opzionale contratti:

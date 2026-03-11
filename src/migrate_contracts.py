@@ -42,6 +42,7 @@ class MongoConfig:
     contract_collection: str
     order_collection: str
     orderitems_collection: str
+    tls_insecure: bool
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,14 @@ def env(name: str, default: str | None = None) -> str:
     return value
 
 
+def parse_bool_env(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def load_config() -> AppConfig:
     load_dotenv()
     pg = PostgresConfig(
@@ -79,6 +88,7 @@ def load_config() -> AppConfig:
         contract_collection=env("MONGO_CONTRACT_COLLECTION", "contract"),
         order_collection=env("MONGO_ORDER_COLLECTION", "order"),
         orderitems_collection=env("MONGO_ORDERITEMS_COLLECTION", "orderitems"),
+        tls_insecure=parse_bool_env("MONGO_TLS_INSECURE", False),
     )
 
     raw_contract_filter = os.getenv("CONTRACT_NAMES_FILTER", "")
@@ -103,7 +113,10 @@ def pg_connect(cfg: PostgresConfig):
 
 
 def mongo_collections(cfg: MongoConfig) -> tuple[Collection, Collection, Collection]:
-    client = MongoClient(cfg.uri)
+    client = MongoClient(
+        cfg.uri,
+        tlsAllowInvalidCertificates=cfg.tls_insecure,
+    )
     db = client[cfg.db]
     return db[cfg.contract_collection], db[cfg.order_collection], db[cfg.orderitems_collection]
 
