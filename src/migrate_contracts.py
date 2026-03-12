@@ -33,6 +33,7 @@ class PostgresConfig:
     user: str
     password: str
     schema: str
+    table: str
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ def load_config() -> AppConfig:
         user=env("POSTGRES_USER"),
         password=env("POSTGRES_PASSWORD"),
         schema=env("POSTGRES_SCHEMA", "sorgenia"),
+        table=env("POSTGRES_TABLE", "contracts"),
     )
     mongo = MongoConfig(
         uri=env("MONGO_URI"),
@@ -129,8 +131,8 @@ def quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def build_contracts_query(schema: str, contract_names_filter: list[str]) -> tuple[str, list[Any]]:
-    base_query = f"SELECT * FROM {quote_ident(schema)}.{quote_ident('contracts')}"
+def build_contracts_query(schema: str, table: str, contract_names_filter: list[str]) -> tuple[str, list[Any]]:
+    base_query = f"SELECT * FROM {quote_ident(schema)}.{quote_ident(table)}"
     if not contract_names_filter:
         return base_query, []
 
@@ -202,15 +204,43 @@ def build_contract_document(row: dict[str, Any]) -> dict[str, Any]:
 
 def insert_contract(contract_col: Collection, contract_doc: dict[str, Any]) -> None:
     normalized_doc = normalize_for_bson(contract_doc)
-    contract_col.update_one(
+    result = contract_col.update_one(
         {"_id": normalized_doc["_id"]},
         {"$setOnInsert": normalized_doc},
         upsert=True,
     )
 
+    if result.upserted_id is not None:
+        logger.info(
+            "[Mongo:contract] insert _id=%s document_id=%s",
+            normalized_doc.get("_id"),
+            normalized_doc.get("document_id"),
+        )
+        return
+
+    logger.info(
+        "[Mongo:contract] record gia' presente _id=%s document_id=%s",
+        normalized_doc.get("_id"),
+        normalized_doc.get("document_id"),
+    )
+
 
 def update_order(order_col: Collection, contract_doc: dict[str, Any]) -> None:
-    order_col.update_many(
+    query = {"contract_id": contract_doc["_id"]}
+    found_records = list(
+        order_col.find(
+            query,
+            {"_id": 1, "contract_id": 1, "accountcode": 1, "contract_number": 1, "contractstatus": 1},
+        )
+    )
+    logger.info(
+        "[Mongo:order] trovati %d record per contract_id=%s ids=%s records=%s",
+        len(found_records),
+        contract_doc["_id"],
+        [record.get("_id") for record in found_records],
+        found_records,
+    )
+    result = order_col.update_many(
         {"contract_id": contract_doc["_id"]},
         {
             "$set": {
@@ -221,10 +251,30 @@ def update_order(order_col: Collection, contract_doc: dict[str, Any]) -> None:
             }
         },
     )
+    logger.info(
+        "[Mongo:order] update contract_id=%s matched=%d modified=%d",
+        contract_doc["_id"],
+        result.matched_count,
+        result.modified_count,
+    )
 
 
 def update_orderitems(orderitems_col: Collection, contract_doc: dict[str, Any]) -> None:
-    orderitems_col.update_many(
+    query = {"contract_id": contract_doc["_id"]}
+    found_records = list(
+        orderitems_col.find(
+            query,
+            {"_id": 1, "contract_id": 1, "accountcode": 1, "contract_number": 1},
+        )
+    )
+    logger.info(
+        "[Mongo:orderitems] trovati %d record per contract_id=%s ids=%s records=%s",
+        len(found_records),
+        contract_doc["_id"],
+        [record.get("_id") for record in found_records],
+        found_records,
+    )
+    result = orderitems_col.update_many(
         {"contract_id": contract_doc["_id"]},
         {
             "$set": {
@@ -234,11 +284,18 @@ def update_orderitems(orderitems_col: Collection, contract_doc: dict[str, Any]) 
             }
         },
     )
+    logger.info(
+        "[Mongo:orderitems] update contract_id=%s matched=%d modified=%d",
+        contract_doc["_id"],
+        result.matched_count,
+        result.modified_count,
+    )
 
 
 def update_billing_profile(pg_cur, schema: str, row: dict[str, Any]) -> None:
     billing_profile_id = row.get("billing_profile_id")
     if billing_profile_id is None:
+        logger.info("[PostgreSQL:billing_profile] skip: billing_profile_id assente")
         return
 
     pg_cur.execute(
@@ -266,11 +323,27 @@ def update_billing_profile(pg_cur, schema: str, row: dict[str, Any]) -> None:
             billing_profile_id,
         ),
     )
+    logger.info(
+        "[PostgreSQL:billing_profile] update id=%s rowcount=%d payload=%s",
+        billing_profile_id,
+        pg_cur.rowcount,
+        {
+            "cig_code": row.get("cig_code"),
+            "cup": row.get("cup"),
+            "e_invoice": row.get("e_invoice"),
+            "institution_name": row.get("institution_name"),
+            "ipa_code": row.get("ipa_code"),
+            "office_code": row.get("office_code"),
+            "sdi_code": row.get("sdi_code"),
+            "sdi_write_date": row.get("sdi_write_date"),
+        },
+    )
 
 
 def update_res_partner(pg_cur, schema: str, row: dict[str, Any]) -> None:
     res_partner_id = row.get("res_partner_id")
     if res_partner_id is None:
+        logger.info("[PostgreSQL:res_partner] skip: res_partner_id assente")
         return
 
     pg_cur.execute(
@@ -280,6 +353,12 @@ def update_res_partner(pg_cur, schema: str, row: dict[str, Any]) -> None:
          WHERE id = %s
         """,
         (row.get("is_split_iva"), res_partner_id),
+    )
+    logger.info(
+        "[PostgreSQL:res_partner] update id=%s rowcount=%d payload=%s",
+        res_partner_id,
+        pg_cur.rowcount,
+        {"is_split_iva": row.get("is_split_iva")},
     )
 
 
@@ -291,11 +370,11 @@ def migrate() -> None:
     pg_conn = pg_connect(cfg.postgres)
     contract_col, order_col, orderitems_col = mongo_collections(cfg.mongo)
 
-    query, params = build_contracts_query(cfg.postgres.schema, cfg.contract_names_filter)
+    query, params = build_contracts_query(cfg.postgres.schema, cfg.postgres.table, cfg.contract_names_filter)
 
     total = 0
     with pg_conn, pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as read_cur:
-        logger.info("[3/6] Query sorgente: lettura da sorgenia.contracts")
+        logger.info("[3/6] Query sorgente: lettura da %s.%s", cfg.postgres.schema, cfg.postgres.table)
         read_cur.execute(query, params)
 
         while True:
