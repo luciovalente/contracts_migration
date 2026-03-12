@@ -163,7 +163,8 @@ def normalize_for_bson(value: Any) -> Any:
 
 def build_contract_document(row: dict[str, Any]) -> dict[str, Any]:
     now = utc_now()
-    return {
+    mongo_id = row.get("document_id") or row.get("id")
+    document = {
         "sorgenia_contract_id": row.get("id"),
         "accountcode": row.get("client_id"),
         "additional_documents": row.get("additional_documents"),
@@ -199,6 +200,9 @@ def build_contract_document(row: dict[str, Any]) -> dict[str, Any]:
         "updated_by": row.get("updated_by"),
         "updatedate": row.get("write_date") or now,
     }
+    if mongo_id is not None:
+        document["_id"] = str(mongo_id)
+    return document
 
 
 def insert_contract(contract_col: Collection, contract_doc: dict[str, Any]) -> None:

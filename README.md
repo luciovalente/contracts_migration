@@ -50,4 +50,4 @@ python src/migrate_contracts.py
 
 ## 4) Nota sul documento `contract`
 
-La funzione `build_contract_document` costruisce il documento Mongo con i campi richiesti (es. `sorgenia_contract_id`, `accountcode`, `cd_proposta`, `contract_number`, `contractstatus`, `signaturedate`, `startdate`, `updatedate`, `internaldata`, ecc.), valorizzando i dati da `sorgenia.contracts` e usando default dove necessario. Il campo `_id` non viene impostato dallo script, quindi viene generato automaticamente da MongoDB nel formato standard `ObjectId`.
+La funzione `build_contract_document` costruisce il documento Mongo con i campi richiesti (es. `sorgenia_contract_id`, `accountcode`, `cd_proposta`, `contract_number`, `contractstatus`, `signaturedate`, `startdate`, `updatedate`, `internaldata`, ecc.), valorizzando i dati da `sorgenia.contracts` e usando default dove necessario. Lo script imposta `_id` come stringa usando prima `document_id` (se presente) e, in fallback, `id`; solo se entrambi mancano lascia a MongoDB la generazione automatica di `ObjectId`.
