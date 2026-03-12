@@ -163,9 +163,8 @@ def normalize_for_bson(value: Any) -> Any:
 
 def build_contract_document(row: dict[str, Any]) -> dict[str, Any]:
     now = utc_now()
-    contract_id = row.get("id")
     return {
-        "_id": str(contract_id) if contract_id is not None else row.get("name"),
+        "sorgenia_contract_id": row.get("id"),
         "accountcode": row.get("client_id"),
         "additional_documents": row.get("additional_documents"),
         "cd_proposta": row.get("proposal_code"),
@@ -204,8 +203,9 @@ def build_contract_document(row: dict[str, Any]) -> dict[str, Any]:
 
 def insert_contract(contract_col: Collection, contract_doc: dict[str, Any]) -> None:
     normalized_doc = normalize_for_bson(contract_doc)
+    contract_id = normalized_doc.get("sorgenia_contract_id")
     result = contract_col.update_one(
-        {"_id": normalized_doc["_id"]},
+        {"sorgenia_contract_id": contract_id},
         {"$setOnInsert": normalized_doc},
         upsert=True,
     )
@@ -213,20 +213,20 @@ def insert_contract(contract_col: Collection, contract_doc: dict[str, Any]) -> N
     if result.upserted_id is not None:
         logger.info(
             "[Mongo:contract] insert _id=%s document_id=%s",
-            normalized_doc.get("_id"),
+            result.upserted_id,
             normalized_doc.get("document_id"),
         )
         return
 
     logger.info(
         "[Mongo:contract] record gia' presente _id=%s document_id=%s",
-        normalized_doc.get("_id"),
+        contract_id,
         normalized_doc.get("document_id"),
     )
 
 
 def update_order(order_col: Collection, contract_doc: dict[str, Any]) -> None:
-    query = {"contract_id": contract_doc["_id"]}
+    query = {"contract_id": contract_doc["sorgenia_contract_id"]}
     found_records = list(
         order_col.find(
             query,
@@ -236,12 +236,12 @@ def update_order(order_col: Collection, contract_doc: dict[str, Any]) -> None:
     logger.info(
         "[Mongo:order] trovati %d record per contract_id=%s ids=%s records=%s",
         len(found_records),
-        contract_doc["_id"],
+        contract_doc["sorgenia_contract_id"],
         [record.get("_id") for record in found_records],
         found_records,
     )
     result = order_col.update_many(
-        {"contract_id": contract_doc["_id"]},
+        {"contract_id": contract_doc["sorgenia_contract_id"]},
         {
             "$set": {
                 "accountcode": contract_doc.get("accountcode"),
@@ -253,14 +253,14 @@ def update_order(order_col: Collection, contract_doc: dict[str, Any]) -> None:
     )
     logger.info(
         "[Mongo:order] update contract_id=%s matched=%d modified=%d",
-        contract_doc["_id"],
+        contract_doc["sorgenia_contract_id"],
         result.matched_count,
         result.modified_count,
     )
 
 
 def update_orderitems(orderitems_col: Collection, contract_doc: dict[str, Any]) -> None:
-    query = {"contract_id": contract_doc["_id"]}
+    query = {"contract_id": contract_doc["sorgenia_contract_id"]}
     found_records = list(
         orderitems_col.find(
             query,
@@ -270,12 +270,12 @@ def update_orderitems(orderitems_col: Collection, contract_doc: dict[str, Any]) 
     logger.info(
         "[Mongo:orderitems] trovati %d record per contract_id=%s ids=%s records=%s",
         len(found_records),
-        contract_doc["_id"],
+        contract_doc["sorgenia_contract_id"],
         [record.get("_id") for record in found_records],
         found_records,
     )
     result = orderitems_col.update_many(
-        {"contract_id": contract_doc["_id"]},
+        {"contract_id": contract_doc["sorgenia_contract_id"]},
         {
             "$set": {
                 "accountcode": contract_doc.get("accountcode"),
@@ -286,7 +286,7 @@ def update_orderitems(orderitems_col: Collection, contract_doc: dict[str, Any]) 
     )
     logger.info(
         "[Mongo:orderitems] update contract_id=%s matched=%d modified=%d",
-        contract_doc["_id"],
+        contract_doc["sorgenia_contract_id"],
         result.matched_count,
         result.modified_count,
     )
@@ -385,7 +385,7 @@ def migrate() -> None:
             for row in rows:
                 total += 1
                 contract_doc = build_contract_document(row)
-                if contract_doc.get("_id") is None:
+                if contract_doc.get("sorgenia_contract_id") is None:
                     continue
 
                 insert_contract(contract_col, contract_doc)
