@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any
 
 import psycopg2
@@ -93,6 +93,10 @@ def load_config() -> AppConfig:
 
     raw_contract_filter = os.getenv("CONTRACT_NAMES_FILTER", "")
     contract_names_filter = [name.strip() for name in raw_contract_filter.split(",") if name.strip()]
+    logger.info(
+        "CONTRACT_NAMES_FILTER letto: %s",
+        contract_names_filter if contract_names_filter else "(vuoto: nessun filtro)",
+    )
 
     return AppConfig(
         postgres=pg,
@@ -139,6 +143,22 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def normalize_for_bson(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, time.min, tzinfo=timezone.utc)
+    if isinstance(value, dict):
+        return {k: normalize_for_bson(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [normalize_for_bson(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(normalize_for_bson(item) for item in value)
+    if isinstance(value, set):
+        return [normalize_for_bson(item) for item in value]
+    return value
+
+
 def build_contract_document(row: dict[str, Any]) -> dict[str, Any]:
     now = utc_now()
     contract_id = row.get("id")
@@ -181,9 +201,10 @@ def build_contract_document(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def insert_contract(contract_col: Collection, contract_doc: dict[str, Any]) -> None:
+    normalized_doc = normalize_for_bson(contract_doc)
     contract_col.update_one(
-        {"_id": contract_doc["_id"]},
-        {"$setOnInsert": contract_doc},
+        {"_id": normalized_doc["_id"]},
+        {"$setOnInsert": normalized_doc},
         upsert=True,
     )
 
