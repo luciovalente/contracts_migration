@@ -2,7 +2,7 @@
 
 Script Python per eseguire una sequenza esplicita di operazioni:
 
-1. Query di lettura da PostgreSQL su `sorgenia.contracts`.
+1. Query di lettura da PostgreSQL su `POSTGRES_SCHEMA.POSTGRES_TABLE` (default `sorgenia.contracts`).
 2. Insert/upsert su MongoDB nella collection `contract` con i campi principali del documento contratto.
 3. Update su MongoDB nella collection `order`.
 4. Update su MongoDB nella collection `orderitems`.
@@ -29,6 +29,7 @@ Compila `.env` con credenziali reali.
   - `POSTGRES_USER`
   - `POSTGRES_PASSWORD`
   - `POSTGRES_SCHEMA` (default: `sorgenia`)
+  - `POSTGRES_TABLE` (default: `contracts`)
 - MongoDB:
   - `MONGO_URI`
   - `MONGO_DB` (default: `sorgenia`)
